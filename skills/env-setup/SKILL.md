@@ -1,27 +1,33 @@
 ---
 name: env-setup
-description: 复现开源代码仓库时自动配置 Python/C++/PyTorch/CUDA/MMCV 等技术栈的 conda 环境
+description: 复现开源代码仓库时自动配置 Python/C++/PyTorch/CUDA/MMCV 等技术栈的 conda 环境，先产出 requirements.txt 和安装方案，再通过 tmux 串行执行 conda/pip/编译命令，适用于视觉、三维重建、自动驾驶等仓库。
 ---
 
 # env-setup：开源仓库环境配置技能
 
-适用于自动驾驶、视觉感知、三维重建等领域的开源仓库复现，技术栈涵盖 Python、C++、PyTorch、CUDA、MMCV 等。
+适用于自动驾驶、视觉感知、三维重建等开源仓库复现，技术栈涵盖 Python、C++、PyTorch、CUDA、MMCV 等。
 
 ## 工作流程总览
 
+```text
+阶段 1：方案设计与依赖整理 → 用户审批 → 阶段 2：tmux 中执行安装 → 阶段 3：验证与汇报
 ```
-阶段 1：方案设计  →  用户审批  →  阶段 2：执行配置  →  阶段 3：验证汇报
-```
+
+原则：
+- 不盲信 README，必须交叉验证源码导入、依赖文件和实际安装结果。
+- 方案设计阶段就产出可执行的 `requirements.txt`，不要等到安装阶段再临时拼。
+- 所有下载安装和编译命令都在 `tmux` 中运行，日志落到 `/tmp/`，不要在前台直接跑长命令。
+- 默认不配置代理。用户已使用 TUN 模式时，不再添加 `http_proxy/https_proxy`。
 
 ---
 
-## 阶段 1：方案设计
+## 阶段 1：方案设计与依赖整理
 
 ### 1.1 信息收集
 
-按优先级依次读取以下文件（存在则读取）：
+按优先级依次读取以下文件：
 
-```
+```text
 README.md / README.rst
 requirements.txt / requirements*.txt
 setup.py / setup.cfg / pyproject.toml
@@ -30,135 +36,30 @@ docs/install.md / INSTALL.md
 任何 setup.sh / install.sh 脚本
 ```
 
-同时扫描源码中的关键导入，交叉验证文档中的版本声明：
+同时扫描源码中的关键导入，交叉验证依赖声明：
 
 ```bash
-grep -r "torch\." --include="*.py" -l | head -5
-grep -r "mmcv\|mmdet\|mmseg\|mmdet3d" --include="*.py" -l | head -5
+rg -n "^(import|from) " --glob '*.py' .
+rg -n "torch\.|mmcv|mmdet|mmseg|mmdet3d" --glob '*.py' .
 ```
 
 ### 1.2 版本分析原则
 
-**不可盲目信任文档**，需交叉验证：
+重点检查：
+- Python 版本是否与 wheel 生态兼容。
+- CUDA 版本来自系统还是环境内。
+- torch / torchvision / torchaudio 是否匹配同一 CUDA 后缀。
+- numpy 是否会被其他包升到 2.x；旧 torch / mmcv / 扩展通常不适合 numpy 2.x。
+- setuptools 是否过新；`torch.utils.cpp_extension` 仍可能依赖 `pkg_resources`，必要时使用 `setuptools<81`。
 
-| 检查项 | 方法 |
-|--------|------|
-| CUDA 版本 | 查看 requirements.txt 中 torch 的 --index-url（cu118/cu121 等） |
-| torch 版本 | 与 MMCV 兼容矩阵交叉验证 |
-| numpy 版本 | numpy 2.x 与旧版 torch/mmcv 不兼容，通常需 numpy<2 |
-| setuptools | MMCV 编译常需降级至 setuptools==59.5.0 |
-
-**MMCV ↔ PyTorch 兼容矩阵（常用）**：
-
-| mmcv-full | torch | CUDA |
-|-----------|-------|------|
-| 1.6.x | 1.9 ~ 1.13 | 10.2 / 11.x |
-| 1.7.x | 1.13 ~ 2.0 | 11.x / 12.x |
-| 2.x (mmcv) | 2.0+ | 11.8 / 12.x |
-
-若文档指定 mmcv-full==1.6.0 但 torch==2.1.0，版本冲突！需降级 torch 或升级 mmcv。
+常用兼容判断：
+- 若项目明确要求 `cu118`，优先使用系统 `/usr/local/cuda-11.8`。
+- 若项目含 MMCV 生态，必须额外核对官方兼容矩阵，不可只看 README。
 
 ### 1.3 CUDA 版本决策
 
-系统全局 CUDA 为 **11.8**（`/usr/local/cuda-11.8`）。
-
-判断逻辑：
-- 若项目所需 CUDA == 11.8 → 直接使用系统 CUDA，设置 `CUDA_HOME=/usr/local/cuda-11.8`
-- 若项目所需 CUDA != 11.8 → **通过 conda 在环境内安装专属 CUDA**，不影响系统和其他环境：
-
-```bash
-# 示例：项目需要 CUDA 12.1
-conda install -n <env_name> -c nvidia cuda-toolkit=12.1 -y
-# 编译时指向 conda 环境内的 cuda
-export CUDA_HOME=$CONDA_PREFIX
-```
-
-在方案文档中明确标注所用 CUDA 来源（系统 or conda 内置）。
-
-### 1.4 安装顺序规划
-
-严格按以下顺序规划，**不可颠倒**：
-
-```
-Step 1: 创建 conda 环境（python 版本由 README 指定）
-Step 2: [若需要] conda 安装专属 CUDA toolkit
-Step 3: 安装 numpy（指定版本，避免后续冲突）
-Step 4: 安装 torch / torchvision / torchaudio（指定版本 + CUDA 后缀）
-Step 5: 安装 setuptools（若需要降级）
-Step 6: 安装 openmim，通过 mim 安装 mmcv/mmdet/mmseg/mmdet3d
-Step 7: pip install 通用依赖（跳过已安装的核心库）
-Step 8: 编译 CUDA 扩展（models/csrc、lib/pointops 等）
-Step 9: 安装可选加速库（pyturbojpeg 等，需 sudo 的告知用户）
-```
-
-### 1.5 数据与模型准备（仅梳理，不执行）
-
-汇总 README 中涉及的数据集下载、预训练模型下载、数据预处理步骤，以列表形式呈现，**不执行任何下载操作**。
-
-### 1.6 输出方案文档
-
-将方案以 Markdown 格式写入项目的 **`docs/env-setup-plan.md`**（若 docs/ 不存在则创建），同时在对话中展示给用户。
-
-文档结构：
-
-```markdown
-# 环境配置方案 — <项目名>
-
-## 基本信息
-- conda 环境名、Python 版本、CUDA 来源（系统/conda）及版本、PyTorch 版本
-
-## 版本冲突分析
-- 列出发现的冲突及解决方案
-
-## 安装步骤
-- 按顺序列出每一步完整命令
-
-## 需要 sudo 的步骤（用户手动执行）
-- 列出需要 sudo 的命令
-
-## 数据与模型准备（供参考，不执行）
-- 数据集、模型下载步骤清单
-```
-
-**等待用户审批后再进入阶段 2。**
-
----
-
-## 阶段 2：执行配置
-
-### 2.1 环境准备
-
-```bash
-# 读取 .bashrc，加载 conda 等环境变量
-grep -E "conda|cuda|PATH" ~/.bashrc | head -30
-source ~/.bashrc 2>/dev/null || true
-which conda && conda --version
-# 确认系统 CUDA
-ls /usr/local/cuda*/version.txt 2>/dev/null || nvcc --version 2>/dev/null
-```
-
-### 2.2 创建 conda 环境
-
-```bash
-conda create -n <env_name> python=<version> -y
-
-# 使用完整路径，避免 activate 失效问题
-CONDA_PREFIX=/home/dzp62442/miniconda3/envs/<env_name>
-PIP=$CONDA_PREFIX/bin/pip
-PYTHON=$CONDA_PREFIX/bin/python
-```
-
-### 2.3 conda 内安装专属 CUDA（仅当项目所需 CUDA ≠ 系统 11.8 时）
-
-```bash
-conda install -n <env_name> -c nvidia cuda-toolkit=<x.y.z> -y  # 必须用完整三段版本号，如 12.1.0，否则 conda 会安装最新版
-# 后续编译时使用：
-export CUDA_HOME=$CONDA_PREFIX
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-```
-
-若项目所需 CUDA == 11.8，则直接使用系统路径：
+系统全局 CUDA 为 **11.8**（`/usr/local/cuda-11.8`）：
+- 若项目也需要 11.8，直接使用系统 CUDA：
 
 ```bash
 export CUDA_HOME=/usr/local/cuda-11.8
@@ -166,123 +67,266 @@ export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 ```
 
-### 2.4 代理配置
+- 若项目需要其他 CUDA 版本，再通过 conda 安装环境内 toolkit，并把 `CUDA_HOME=$CONDA_PREFIX`。
 
-**始终在脚本开头设置代理环境变量**（pip/mim/conda 均通过环境变量继承，不要用 --proxy 参数，mim 不支持）：
+### 1.4 编写 requirements.txt
+
+若仓库根目录没有合适的 `requirements.txt`，或现有文件明显缺失/混乱，则在方案设计阶段直接生成或更新根目录 `requirements.txt`，来源包括：
+- 根 `environment.yml` 中的 pip 依赖
+- 子模块已有 `requirements*.txt`
+- 源码实际导入但依赖文件未声明的第三方包
+- 需要剔除或修正的错误 pin
+
+生成后要在方案里明确说明：
+- 这个 `requirements.txt` 是新建还是修订
+- 哪些包是补上的
+- 哪些版本被改写以及原因
+
+### 1.5 安装顺序规划
+
+默认顺序：
+
+```text
+Step 1: 创建 conda 环境
+Step 2: [若需要] 安装环境内 CUDA toolkit
+Step 3: 安装 numpy
+Step 4: 安装 torch / torchvision / torchaudio
+Step 5: 调整 setuptools 版本
+Step 6: [若使用 MMCV 生态] 安装 openmim，通过 mim 安装 mmcv/mmdet/mmseg/mmdet3d
+Step 7: 安装其余 Python 依赖（requirements.txt）
+Step 8: 编译 CUDA / C++ 扩展
+Step 9: 安装其他库（如有）
+Step 10: 验证环境
+```
+
+### 1.6 数据与模型准备（仅梳理，不执行）
+
+把 README 中提到的数据集、权重、预处理步骤列成清单。
+
+### 1.7 输出方案文档
+
+将方案写入项目内 `docs/env-setup-plan.md`，同时在对话里展示摘要。
+
+文档至少包含：
+
+```markdown
+# 环境配置方案 — <项目名>
+
+## 基本信息
+- conda 环境名
+- Python 版本
+- CUDA 来源与版本
+- torch 版本
+
+## 版本冲突分析
+- 冲突项
+- 解决方式
+
+## requirements.txt 设计
+- 新建或修订说明
+- 关键包来源与版本调整
+
+## 安装步骤
+- 按顺序列出完整命令
+
+## 数据与模型准备
+- 仅清单，不执行
+```
+
+**等待用户审批后再进入阶段 2。**
+
+---
+
+## 阶段 2：tmux 中执行安装
+
+### 2.1 统一规则：所有安装命令都在 tmux 中运行
+
+所有会修改环境、联网下载、编译扩展的命令，都必须在 `tmux` 会话中执行。
+
+标准做法：
+- 新建专用会话，例如 `env_install`、`repo_env_install`
+- 把每一段命令通过 `tmux send-keys` 发进去
+- 日志统一写到 `/tmp/<repo>_env_install.log`
+- 通过 `tmux capture-pane` 和 `tail` 轮询进度
+- 不要把长命令直接阻塞在前台 shell
+
+推荐模式：
 
 ```bash
-export http_proxy=http://127.0.0.1:7890
-export https_proxy=http://127.0.0.1:7890
-export HTTP_PROXY=http://127.0.0.1:7890
-export HTTPS_PROXY=http://127.0.0.1:7890
-# 定义 PROXY 变量供 pip 备用（conda/mim 只认环境变量）
-PROXY="--proxy http://127.0.0.1:7890"
+tmux new-session -d -s <session>
+tmux send-keys -t <session> "cd <repo> && <command> |& tee -a /tmp/<log>.log" C-m
+tmux capture-pane -t <session> -p | tail -n 40
+tail -n 40 /tmp/<log>.log
+```
+
+### 2.2 tmux 实战经验
+
+在实际安装中，优先遵循以下经验：
+- 会话名固定，避免重复创建多个安装会话。
+- 每一段命令前打印阶段标题和时间戳，便于回看日志。
+- 同一会话内串行发送命令；只有确认 shell 返回 prompt 后再发下一段。
+- `tmux capture-pane` 能看到实时状态，但 `tee`/pip 有时会缓冲；必要时同时检查 `/tmp/*.log` 和进程状态。
+- 若要确认会话是否空闲，可向 tmux 发送一个空回车，再抓 pane 输出。
+- 长下载阶段不要误判为卡死；结合临时文件大小、`ps`、日志一起判断。
+
+### 2.3 环境准备
+
+```bash
+source ~/.bashrc 2>/dev/null || true
+which conda && conda --version
+ls /usr/local/cuda*/version.txt 2>/dev/null || nvcc --version 2>/dev/null
+```
+
+### 2.4 创建 conda 环境
+
+```bash
+conda create -n <env_name> python=<version> pip -y
+```
+
+若 conda 因插件、虚拟包或求解器报错，优先尝试：
+
+```bash
+export CONDA_NO_PLUGINS=true
+conda create --solver=classic -n <env_name> python=<version> pip -y
+```
+
+创建后统一使用绝对路径：
+
+```bash
+CONDA_PREFIX=/home/dzp62442/miniconda3/envs/<env_name>
+PYTHON=$CONDA_PREFIX/bin/python
+PIP="$PYTHON -m pip"
 ```
 
 ### 2.5 核心库安装
 
+优先使用环境内 Python 直接调用 pip，不要默认用 `conda run -n ... pip` 跑大下载任务。
+
 ```bash
-$PIP install "numpy==<version>" $PROXY
+$PIP install --upgrade pip wheel
+$PIP install "numpy==<version>"
 $PIP install torch==<version> torchvision==<version> torchaudio==<version> \
-    --index-url https://download.pytorch.org/whl/cu<cuda_suffix> $PROXY
-$PIP install "setuptools==59.5.0" $PROXY
+  --index-url https://download.pytorch.org/whl/cu<cuda_suffix>
 ```
 
-### 2.6 MMCV 生态安装
-
-mim 不支持 --proxy 参数，**必须通过 2.4 节的环境变量传代理**，否则依赖包走直连会超时。
+若项目后续编译扩展，且 torch 的 C++ 扩展需要 `pkg_resources`，则在扩展编译前先执行：
 
 ```bash
-$PIP install openmim $PROXY
-# mim 继承环境变量中的代理，无需额外参数
+$PIP install 'setuptools<81'
+```
+
+### 2.6 安装其余 Python 依赖
+
+```bash
+$PIP install -r requirements.txt
+```
+
+安装后需要重新核对以下核心版本是否被覆盖：
+- numpy
+- setuptools
+- pillow
+- requests
+
+若与方案不符，要记录并决定是否回钉。
+
+### 2.7 MMCV 生态
+
+仅在项目实际使用 MMCV 生态时安装：
+
+```bash
+$PIP install openmim
 $CONDA_PREFIX/bin/mim install mmcv-full==<version>
 $CONDA_PREFIX/bin/mim install mmdet==<version>
 $CONDA_PREFIX/bin/mim install mmsegmentation==<version>
 $CONDA_PREFIX/bin/mim install mmdet3d==<version>
 ```
 
-### 2.7 通用依赖安装
+### 2.8 常见 CUDA 扩展编译经验
+
+编译前先设置：
 
 ```bash
-$PIP install -r requirements.txt \
-    --ignore-installed torch torchvision torchaudio numpy setuptools
+export CUDA_HOME=/usr/local/cuda-11.8
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 ```
 
-### 2.8 CUDA 扩展编译
-
-确保 CUDA_HOME 已按 2.3 节设置，然后：
+统一经验：
+- 先装 torch，再编译本地 CUDA 扩展。
+- 本地扩展默认优先尝试 `--no-build-isolation`，避免隔离环境看不到 torch。
+- `simple-knn` 和 `diff-gaussian-rasterization` 可直接用同一模式安装：
 
 ```bash
-cd models/csrc && $PYTHON setup.py build_ext --inplace && cd ../..
-cd lib/pointops && $PIP install . && cd ../..
+$PIP install -v --no-build-isolation submodules/simple-knn
+$PIP install -v --no-build-isolation submodules/diff-gaussian-rasterization
 ```
 
-### 2.9 需要 sudo 的步骤
+- 若同时存在 `croco/models/curope` 和 `dust3r/croco/models/curope`，要按实际导入路径编译；很多仓库实际走 `dust3r/croco`，此时不能只编根目录副本：
 
-遇到需要 sudo 的命令，停止执行，告知用户：
-
+```bash
+cd croco/models/curope && $PYTHON setup.py build_ext --inplace
+cd <repo_root>
+cd dust3r/croco/models/curope && $PYTHON setup.py build_ext --inplace
 ```
-⚠️ 以下步骤需要 sudo 权限，请在终端手动执行：
-  sudo apt-get update
-  sudo apt-get install -y libturbojpeg
-执行完成后告知我，我将继续后续步骤。
-```
-
-### 2.10 耗时任务处理
-
-预计耗时 > 2 分钟的任务（torch 下载、CUDA 扩展编译等），使用 `run_in_background=true` 的 Bash 工具执行，日志写到 /tmp/ 文件，完成后通知。
-**不要用 subagent**——subagent 的 Bash 权限受限，无法执行安装命令。
 
 ---
 
 ## 阶段 3：验证与汇报
 
-### 3.1 环境验证
+### 3.1 基础验证
+
+优先验证：
 
 ```bash
-conda run -n <env_name> python - << 'EOF'
-import sys
-print(f"Python: {sys.version}")
-import numpy as np; print(f"NumPy: {np.__version__}")
+$PYTHON - <<'EOF'
 import torch
-print(f"PyTorch: {torch.__version__}")
-print(f"CUDA available: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"CUDA version: {torch.version.cuda}")
-    print(f"GPU: {torch.cuda.get_device_name(0)}")
-for pkg in ['mmcv', 'mmdet', 'mmseg', 'mmdet3d']:
-    try:
-        m = __import__(pkg); print(f"{pkg}: {m.__version__}")
-    except ImportError as e: print(f"{pkg}: FAILED - {e}")
-for ext in ['_msmv_sampling_cuda', 'pointops']:
-    try:
-        __import__(ext); print(f"{ext}: OK")
-    except ImportError as e: print(f"{ext}: FAILED - {e}")
+print('torch', torch.__version__)
+print('cuda', torch.version.cuda)
+print('cuda_available', torch.cuda.is_available())
 EOF
 ```
 
-### 3.2 汇报格式
+### 3.2 扩展与业务验证
 
-输出包含：
-- 版本对比表（期望版本 vs 实际版本 vs 状态）
-- CUDA 来源说明（系统 or conda 内置）
-- conda activate 命令
-- 踩坑记录（问题 → 解决方案）
-- 待用户手动完成的事项清单
+若直接导入自定义扩展报 `libc10.so` / `libtorch*.so` 找不到，先显式 `import torch`，必要时补：
+
+```bash
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib/python3.11/site-packages/torch/lib:$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+```
+
+验证时按“通用扩展 → 项目入口”两层做：
+
+```bash
+$PYTHON - <<'EOF'
+import torch
+import simple_knn._C
+import diff_gaussian_rasterization
+print('gaussian extensions ok')
+EOF
+```
+
+然后补充项目实际入口导入，例如 `from mast3r.model import AsymmetricMASt3R`、`import mmcv`、`import pointops`。若不再出现 `Warning, cannot find cuda-compiled version of RoPE2D`，说明对应 `curope` 已编译到实际导入路径。
+
+### 3.3 汇报格式
+
+汇报必须包含：
+- 最终环境名与激活命令
+- 关键版本：Python / torch / CUDA / numpy
+- `requirements.txt` 是否新建或修订
+- 已安装并验证通过的扩展
+- 踩坑记录：问题 → 原因 → 解决方式
+- 尚未完成的项
 
 ---
 
 ## 常见问题速查
 
 | 问题 | 原因 | 解决方案 |
-|------|------|---------| 
-| mmcv 与 torch 版本不兼容 | 文档版本冲突 | 查 mmcv 官方兼容矩阵，降级 torch |
-| numpy 导入报错 | numpy 2.x 不兼容 | pip install "numpy<2" |
-| CUDA 扩展编译失败 | CUDA_HOME 未设置 | 按 2.3 节设置 CUDA_HOME |
-| setuptools 编译报错 | 版本过高 | pip install setuptools==59.5.0 |
-| pip 下载极慢 | 网络问题 | 启用 clash 代理（7890 端口） |
-| mim install 找不到包 | openmim 未安装 | 先 pip install openmim |
-| conda activate 无效 | 环境变量未加载 | 先 source ~/.bashrc |
-| conda cuda 与系统 cuda 冲突 | PATH 顺序问题 | 确保 $CONDA_PREFIX/bin 在 /usr/local/cuda-11.8/bin 之前 |
-| mim install 依赖下载超时 | mim 不支持 --proxy | 用环境变量 export http_proxy=... 传代理 |
-| conda cuda 装了错误版本 | 版本号不精确 | 用完整三段版本号如 cuda-toolkit=12.1.0 |
+|------|------|---------|
+| conda 因插件或虚拟包报错 | 插件环境异常 | `export CONDA_NO_PLUGINS=true`，必要时加 `--solver=classic` |
+| torch / 本地 CUDA 扩展编译异常 | torch 未先安装，或 build isolation 隔离了 torch | 先装 torch，再用 `pip install --no-build-isolation <local_pkg>` |
+| `torch.utils.cpp_extension` 报 `pkg_resources` 缺失 | setuptools 过新 | `pip install 'setuptools<81'` |
+| 直接导入自定义扩展时报 `libc10.so` 缺失 | torch 动态库未预加载 | 先 `import torch`，或补 `LD_LIBRARY_PATH` |
+| 只编了根目录 `curope` 仍出现 RoPE 警告 | 实际导入走的是 `dust3r/croco` | 再编 `dust3r/croco/models/curope` |
+| pip 大轮子下载时日志不动 | 输出缓冲，不一定卡死 | 同时检查 tmux pane、日志、进程和临时文件大小 |
+| `conda run -n ... pip` 表现异常 | 包装层额外引入问题 | 优先用 `$CONDA_PREFIX/bin/python -m pip` |
