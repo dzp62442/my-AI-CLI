@@ -16,7 +16,7 @@ description: 复现开源代码仓库时自动配置 Python/C++/PyTorch/CUDA/MMC
 原则：
 - 不盲信 README，必须交叉验证源码导入、依赖文件和实际安装结果。
 - 方案设计阶段就产出可执行的 `requirements.txt`，不要等到安装阶段再临时拼。
-- 所有下载安装和编译命令都在 `tmux` 中运行，日志落到 `/tmp/`，不要在前台直接跑长命令。
+- 所有下载安装、编译命令、`conda` 命令都在 `tmux` 中运行，日志落到 `/tmp/`，不要在前台直接跑长命令，不要在 Codex 前台/沙箱里直接跑 `conda info`、`conda env list`、`conda install`。
 - 默认不配置代理。用户已使用 TUN 模式时，不再添加 `http_proxy/https_proxy`。
 
 ---
@@ -145,6 +145,7 @@ Step 10: 验证环境
 
 标准做法：
 - 新建专用会话，例如 `env_install`、`repo_env_install`
+- `conda` 相关命令一律在该会话的宿主机 shell 中执行
 - 把每一段命令通过 `tmux send-keys` 发进去
 - 日志统一写到 `/tmp/<repo>_env_install.log`
 - 通过 `tmux capture-pane` 和 `tail` 轮询进度
@@ -163,11 +164,13 @@ tail -n 40 /tmp/<log>.log
 
 在实际安装中，优先遵循以下经验：
 - 会话名固定，避免重复创建多个安装会话。
+- 会话启动后先 `source ~/.bashrc`，确保宿主 shell 能正确拿到 `conda` 初始化。
 - 每一段命令前打印阶段标题和时间戳，便于回看日志。
 - 同一会话内串行发送命令；只有确认 shell 返回 prompt 后再发下一段。
 - `tmux capture-pane` 能看到实时状态，但 `tee`/pip 有时会缓冲；必要时同时检查 `/tmp/*.log` 和进程状态。
 - 若要确认会话是否空闲，可向 tmux 发送一个空回车，再抓 pane 输出。
 - 长下载阶段不要误判为卡死；结合临时文件大小、`ps`、日志一起判断。
+- 环境状态优先用环境目录和 `$PYTHON` 做验证，不要依赖前台 `conda info` / `conda env list`。
 
 ### 2.3 环境准备
 
@@ -274,6 +277,8 @@ cd dust3r/croco/models/curope && $PYTHON setup.py build_ext --inplace
 ## 阶段 3：验证与汇报
 
 ### 3.1 基础验证
+
+优先使用环境内 Python 验证，不直接依赖 `conda info` / `conda env list`。
 
 优先验证：
 
