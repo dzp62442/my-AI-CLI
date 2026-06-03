@@ -1,0 +1,79 @@
+# Template: common Volc ml_task configuration for dzp training jobs.
+# Validation status:
+# - A smoke task based on this structure was submitted with `volc ml_task submit`
+#   as `dzp_volc_test` and finished successfully on 2026-06-03.
+# - The smoke test changed only task name, entrypoint, and GPU flavor.
+#
+# Before submitting:
+# - Ask the user for explicit confirmation.
+# - Name tasks as dzp_<project>_<experiment>; keep <experiment> identical to
+#   the final work_dir directory name.
+# - In most cases only change TaskName and Entrypoint.
+# - Sometimes change TaskRoleSpecs[0].Flavor for GPU count.
+# - Do not put AK/SK in this file. TOS API key auth appears to be handled by
+#   active `volc configure` credentials and platform-side permission checks.
+
+TaskName: "dzp_replaceproject_replaceexperiment"
+Description: ""
+Entrypoint: "cd /vepfs-mlp2/c20250502/haoce/dzp/SV-Occ\n. /root/miniconda3/bin/activate\nsource haoce_activate.sh\nexport GIT_SSH_COMMAND=\"ssh -o HostName=ssh.github.com -o Port=443 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30\"\ngit fetch --prune origin\ngit pull --ff-only\ngit log -1 --oneline\nPYTHONPATH=. mim train mmdet3d configs/replace_with_config.py -l pytorch -G 4 \\\n  --work-dir work_dirs/replace_with_work_dir"
+Tags: []
+
+# Leave empty when code already exists on mounted storage and Entrypoint uses it directly.
+UserCodePath: ""
+RemoteMountCodePath: ""
+
+Envs: []
+ResourceQueueID: "q-20251224110115-844wd"
+Framework: "PyTorchDDP"
+Priority: 6
+Preemptible: true
+TaskRoleSpecs:
+  - RoleName: "worker"
+    RoleReplicas: 1
+    # Common choices:
+    # - ml.pni2.3xlarge: 1 x A100-80G
+    # - ml.pni2.7xlarge: 2 x A100-80G, verify before use
+    # - ml.pni2.14xlarge: 4 x A100-80G
+    # - 8 x A100-80G flavor should be verified before use
+    Flavor: "ml.pni2.14xlarge"
+
+ActiveDeadlineSeconds: 864000
+EnableTensorBoard: false
+
+Storages:
+  - Type: "TosFuse"
+    MountPath: "/c20250502"
+    Bucket: "c20250502"
+    Prefix: "/"
+    ReadOnly: true
+  - Type: "Vepfs"
+    MountPath: "/vepfs-mlp2/c20250502/haoce"
+    VepfsId: "vepfs-cnbj2c98dea54433"
+    SubPath: "c20250502/haoce"
+  - Type: "Vepfs"
+    MountPath: "/vepfs-mlp2/mlp-public/haoce"
+    VepfsId: "vepfs-cnbj2c98dea54433"
+    SubPath: "mlp-public/haoce"
+
+ImageUrl: "cr-mlp-cn-beijing.cr.volces.com/public/haoce_dev_template_base:v1"
+CacheType: "Cloudfs"
+
+RetryOptions:
+  EnableRetry: true
+  MaxRetryTimes: 5
+  IntervalSeconds: 120
+  PolicySets:
+    - "InstanceReclaimed"
+    - "Failed"
+    - "MachineFailure"
+  EnableReserveResourceOnRetry: false
+
+DiagOptions:
+  - Name: "EnvironmentalDiagnosis"
+    Enable: false
+  - Name: "PythonDetection"
+    Enable: false
+  - Name: "LogDetection"
+    Enable: false
+  - Name: "VecclHangDetection"
+    Enable: false
