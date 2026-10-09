@@ -1,389 +1,98 @@
 ---
 name: volc-ml-task
-description: 火山引擎机器学习平台 Volc CLI 的自定义训练任务管理技能。用于查看、筛选、诊断、导出、提交火山机器学习平台 ml_task 训练任务，尤其是用户以 dzp 开头创建的任务；也适用于解释或生成 volc ml_task submit/list/get/logs/export/instance 命令和训练 YAML 配置。对创建、取消、停止、删除等会改变线上任务状态的操作必须谨慎处理。
+description: 火山引擎机器学习平台 Volc CLI 自定义训练任务管理。用于查看、筛选、诊断、导出 dzp 任务，以及准备、校验和经用户授权提交训练 YAML；不接管凭证配置，不擅自创建、停止或删除任务。
 ---
 
 # Volc ML Task
 
-使用火山引擎机器学习平台 CLI 管理自定义训练任务时遵循本技能。
+## 范围与调用环境
 
-完整官网导出文档在 [references/full-cli-doc.md](references/full-cli-doc.md)。只有当本技能正文不足以回答问题、需要查询模型仓库/推理服务/完整字段含义/边缘参数时，才读取完整文档。常用 CLI YAML 模板在 [references/ml-task-template.yaml](references/ml-task-template.yaml)。优先用 `rg` 定位章节，例如：
+- 用户任务名称以 `dzp` 开头；查询列表时用 `-n dzp`，用户已指定任务 ID 时直接查询该任务。
+- 不安装、升级 `volc`，不运行 `volc configure`，不改动 AK/SK、账号或 Region。沿用用户已有 API 密钥鉴权；不读取、回显或复制密钥到配置、日志、文档中。
+- 每次在非交互 shell 调用 `volc` 前，先 `. "$HOME/.volc_env"`；不要加载完整 `.shell_env`。
+- `list/get/instance list/submit` 默认加 `--output json`，避免交互界面。`logs/export/cancel` 不添加未经支持的输出参数。
+- 常规命令使用 `volc ml_task`；只有本机确实仅有 `mlp` 时才替换命令名。
 
-```bash
-rg -n "^### submit|^### logs|ResourceQueue|SidecarMemoryRatio" references/full-cli-doc.md
-```
+## 授权与监控边界
 
-## 边界
+- 查看、分析、编写配置不代表获准提交。创建任务前展示配置摘要与命令，取得用户对本轮任务的明确确认；若用户已对同一份配置和提交次数作出明确授权，不重复索要同一确认。新改动或新增任务超出授权时重新确认。
+- 提交授权不包含 commit、push、安装依赖、停止、取消或删除其他任务。项目 README / 本轮指令仍要求用户手动提交时，不能仅凭本技能改为自动提交。
+- 取消、停止、删除必须由用户明确要求；操作前只读核验任务 ID、名称、状态和可获得的创建者信息，再确认具体目标与操作。
+- **除非用户明确要求持续监控，否则只做一次状态检查；不等待排队结束、不持续轮询、不使用 `logs -f`。** 用户已有独立监控服务。
+- 创建请求超时不等于创建失败；先查询是否已创建，无法确定时报告，不盲目重提。平台自动重试不等于授权 Agent 另建任务。
 
-- 不接管 `volc` 的安装、升级、`volc configure`、AK/SK/Region 配置。这些由用户手动完成。
-- 默认认为用户已经完成凭证配置，配置文件位于 `$HOME/.volc/config` 和 `$HOME/.volc/credentials`。
-- 在非交互 shell 中调用 `volc` 前，先加载最小环境文件 `$HOME/.volc_env`，不要为了 `volc` 加载完整 `$HOME/.shell_env`。
-- 优先关注 `ml_task` 自定义训练任务。`ml_model`、`ml_service` 只在用户明确询问时再查完整文档。
-- 官网文档中有些示例使用 `mlp`，但 `ml_task` 常规命令优先写成 `volc ml_task ...`。若本机只有 `mlp` 可用，再改用 `mlp`。
+## 用户固定默认值
 
-## 命令执行约定
+以下是用户明确指定的默认配置。**除非用户明确要求修改对应项，否则绝对不许改变，也不能为排队、报错或测试方便自行降级或替换。** 以 [ml-task-template.yaml](references/ml-task-template.yaml) 为配置基准：
 
-Agent 通常在非交互 shell 中执行命令。运行任何 `volc` 命令前，先显式加载环境：
+| 项目 | 固定默认值 |
+| --- | --- |
+| 队列 | `c20250502`，ID `q-20251224110115-844wd` |
+| 优先级与闲时资源 | `Priority: 9`，`Preemptible: true` |
+| 计算资源 | 一个 worker 实例，`ml.pni2.14xlarge`，4 卡 Tesla A100-80G，`PyTorchDDP` |
+| 镜像 | `cr-mlp-cn-beijing.cr.volces.com/public/haoce_dev_template_base:v1` |
+| TOS | `c20250502` 桶根目录挂载到 `/c20250502`，Fuse，读写（`ReadOnly: false`） |
+| vePFS | 模板中的两处挂载，均为读写；路径、子目录和文件系统 ID 不变 |
+| 鉴权 | 沿用现有 API 密钥及平台权限，不更换身份或鉴权方式 |
+| 自动重试 | 开启，间隔 120 秒，上限 10 次；触发条件为 Failed、MachineFailure、InstanceReclaimed，不保留重试资源 |
+| 其他环境项 | 沿用模板的运行时限、缓存方式、关闭 TensorBoard 和诊断项等配置 |
 
-```bash
-. "$HOME/.volc_env"
-```
+另外两项硬要求：
 
-自动化读取任务信息时，优先使用机器可读输出：
+- **绝对不填写任务名称下面的描述和标签。** YAML 保持 `Description: ""`、`Tags: []`；不得借用描述、标签记录 commit、方案摘要或提交追踪信息，也不得通过 CLI 参数覆写。
+- **云端任务入口指令必须简洁。** 固定采用五行结构：进入工作树、激活平台 conda、加载项目环境、调用项目内 Git 同步脚本、执行 Goal 交付的单一实验指令。各行用普通换行分隔，不添加 `&&`。其他校验放入脚本，不能把长检查命令或内联程序塞进入口；不必压缩成两行。
 
-- `list`、`get`、`instance list` 支持 `--output json`，Agent 默认加上。
-- `submit` 支持 `--output json`，但提交任务必须先二次确认。
-- `logs` 输出日志文本，按需使用 `--lines`、`--content`、`--reverse`、`-f`。
-- `upload`、`export`、`cancel` 按文档没有通用 `--output json`，不要强行添加未知参数。
+TOS 可读写只代表挂载权限，不授权删除、移动、覆盖长期共享数据或缓存。项目既有数据保护约定仍然有效。
 
-不加 `--output json` 时，`list`、`get`、`instance list` 可能进入面向人工的交互/格式化输出，不适合作为 Agent 默认模式。已验证 `volc ml_task list -n dzp` 会进入交互式 `TaskList` 界面，在非 TTY 场景下可能以 `exit status 255` 结束。
+## 查看状态与日志
 
-## 安全规则
-
-- 用户创建的任务名称都以 `dzp` 开头。列任务、查任务时优先加 `-n dzp` 或 `--name dzp`，过滤大量无关任务。
-- 训练任务命名遵循 `dzp_<project>_<experiment>`：先是固定前缀 `dzp`，再接项目简称，最后接实验名称，三段用下划线分隔。项目简称不必与项目文件夹完全一致，例如 `SV-Occ` 可写作 `svocc`。实验名称应与 `work_dir` 末级目录一致，例如 `work_dirs/AA` 对应任务名 `dzp_svocc_AA`。
-- 任何任务创建操作，包括 `volc ml_task submit`，执行前必须向用户二次确认，并展示将要执行的命令和关键配置摘要。
-- 原则上不要替用户取消、停止、删除任务。除非用户强烈要求，并且在二次确认中明确给出任务 ID 与操作类型。
-- 执行取消/停止/删除前，必须先用 `get` 或 `list` 核对任务 ID、任务名、状态、创建者/可见范围等可获得信息，避免误操作。
-- 不要在未经用户确认时修改线上任务状态；只读命令如 `list/get/logs/export/instance list` 可以直接执行。
-
-## 状态解读
-
-- 火山机器学习平台可能因自动调度、闲时资源抢占、自动重试等机制改变任务状态。
-- 可抢占任务可能出现旧任务变为 `Killed`，随后平台自动复制/创建一个同名的新任务继续排队或运行。这通常不代表用户手动停止。
-- 代码或环境存在 bug 时，任务可能 `Failed` 后自动重试，直到达到配置的重试上限。用户当前常见上限为 5 次。
-- 遇到同名任务一旧一新、旧任务 `Killed` 或 `Failed`、新任务继续 `Running/Queue/Staging` 时，优先解释为平台重调度/重试现象；需要确认原因时再查看任务详情和日志。
-- 任务日志时间可能与本地/平台展示时间差 8 小时。如果日志内容连续且与任务运行阶段吻合，优先判断为日志时区错位，而不是日志陈旧；用户后续可能修复该问题。
-
-## 用户调用方式
-
-### 看当前状态
-
-用户说“看一下现在的状态”“现在任务怎么样了”等类似描述时：
-
-1. 先列出近 10 条、全部常见状态的 `dzp` 任务，使用精简字段输出。
-2. 找出 `Running/Queue/Staging` 任务，优先关注 `Running`。
-3. 对正在运行的任务查看最新 100 条日志，概括训练/验证进度、最近指标、是否有明显错误。
-4. 若出现同名旧任务 `Killed/Failed` 后新任务继续运行，按平台重调度/抢占/重试现象解释，除非日志或详情显示明确异常。
+一次状态检查按需使用列表、详情和日志，不是只能调用一条命令。默认只列最近 10 条，用户要求更多历史时再取 25 条或翻页：
 
 ```bash
 . "$HOME/.volc_env"
 volc ml_task list -n dzp \
   --status Initialized,Queue,Staging,Running,Killing,Success,Failed,Killed,Exception \
-  --limit 10 \
-  --offset 0 \
-  --output json \
+  --limit 10 --offset 0 --output json \
   --format=JobId,JobName,Status,Start,End
-```
-
-对每个需要查看进度的运行中任务：
-
-```bash
+volc ml_task get --id <task-id> --output json
 volc ml_task logs -t <task-id> -i worker_0 --lines 100
 ```
 
-若用户要求“查看更多”“历史任务”等，再列出近 25 条任务；超过 25 条时再增大 `--limit` 或用 `--offset` 翻页。
+- 优先查看 Running，其次 Queue/Staging；只读相应任务的必要日志。
+- `get --output json` 默认字段有限，按需用 `get --helpformat` 后指定 `--format`。不要因为默认输出没有某字段就认定它未配置。
+- `logs` 默认向前取最近日志；`--reverse` 取任务开始时的日志，不适合检查最新进度。按需用 `--content error` 筛选。
+- `instance list --id <task-id> --output json` 返回的完整实例名不是日志参数；日志通常使用 `worker_0`。
+- 日志与平台时间可能差 8 小时，应结合内容判断时区，不直接认为任务停滞。
+- 同名旧任务 Killed/Failed、新任务继续运行时，可能是资源回收或自动重试；结合详情与日志判断，不武断认定用户停止或程序必然有 bug。重试上限读取当前任务配置，用户现默认是 10 次。
 
-### 提交训练任务
+## 准备与提交任务
 
-用户说“提交一个任务”“跑一下实验”“基于某个配置起任务”等类似描述时：
+涉及准备 YAML、解释具体提交指令或实际提交时，必须阅读 [提交流程](references/submit-workflow.md)。它包含工作树与入口选择、默认值核验、提交前确认、防止重复创建和提交后的一次性回读。
 
-1. 先明确用户意图：任务名、训练配置文件、work-dir、GPU 数量、是否需要复用默认队列/镜像/存储/重试策略。
-2. 按 `dzp_<project>_<experiment>` 生成任务名；实验名必须与 `work_dir` 末级目录一致，项目简称按用户常用叫法或仓库语义取简短小写形式。
-3. 默认从 [references/ml-task-template.yaml](references/ml-task-template.yaml) 复制生成临时 YAML；绝大多数情况只改 `TaskName` 和 `Entrypoint`。
-4. 若用户指定 GPU 数量，再修改 `TaskRoleSpecs[0].Flavor`。常见已知值：1 卡 `ml.pni2.3xlarge`，4 卡 `ml.pni2.14xlarge`；2 卡、8 卡规格需要从控制台或导出任务确认后再用。
-5. 入口命令开头必须包含固定环境准备：
-   - `cd /vepfs-mlp2/c20250502/haoce/dzp/SV-Occ`
-   - `. /root/miniconda3/bin/activate`
-   - `source haoce_activate.sh`
-6. 环境准备后先用 GitHub SSH 443 同步代码并打印最新提交，再运行具体训练命令。不要假设当前远端代码已正确。
-7. 展示将提交的关键配置摘要和 `volc ml_task submit` 命令，等待用户二次确认；确认前不得提交。摘要必须格式化列出任务名称、入口命令、GPU 数量，并核查自动重试、闲时资源、优先级、队列、镜像、存储挂载、诊断项是否与默认模板有出入。
-8. 提交后立即读取任务 ID，查询状态；任务进入 `Running` 后查看最新 100 条日志确认启动正常。
+- 默认只修改 `TaskName` 和 `Entrypoint`，其余保持模板配置。
+- 命名为 `dzp_<project>_<worktree>_<experiment>`：依次是姓名、项目简称、工作树简称、实验简称；SV-Occ 的 `dev_semantic` 使用 `sem`。总长最多 **31 个字符**（含下划线），以 `dzp_svocc_sem_gauss_suppress_v1` 为上限示例。绝不使用 `smoke`，不加日期后缀，不展开冗长分支全名。实验名可含下划线，保留核心方法、用途或必要版本；参考已有名称作有意义的缩写，不机械截断。任务简称与真实输出目录分别记录，不要求字面一致，也不为命名修改实验目录。
+- [本地配置校验器](scripts/validate_task_config.py) 仅解析配置、核对默认值，不联网、不提交；需要现有 Python 环境有 PyYAML。它不能证明用户已授权或云端环境已就绪。
+- `cloud_sync.sh` 是 SV-Occ 项目专用脚本，由 SV-Occ 仓库维护在根目录，与 `haoce_activate.sh` 并列；本技能不保存或分发其副本。其他项目使用自身的同步脚本，不直接套用 SV-Occ 实现。首次上云仍需确认项目脚本已同步，见提交流程。
+- 只读导出任务时，使用独立临时目录：`volc ml_task export --task <task-id> --config`。**导出不一定完整**：已验证的四个历史任务均启用 Preemptible，但导出 YAML 未保留此字段。必须结合 `get` 和固定模板复核，不能直接把导出文件原样提交。
+- 当前工作流使用 vePFS 已有仓库和 Git 更新，`UserCodePath`、`RemoteMountCodePath` 留空。不要顺手上传代码包，更不要用 `--copy-links` 把数据、权重或 work_dirs 软链接目标整体上传。
 
-入口命令推荐结构：
+## 危险操作
 
-```bash
-cd /vepfs-mlp2/c20250502/haoce/dzp/SV-Occ
-. /root/miniconda3/bin/activate
-source haoce_activate.sh
-export GIT_SSH_COMMAND="ssh -o HostName=ssh.github.com -o Port=443 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30"
-git fetch --prune origin
-git pull --ff-only
-git log -1 --oneline
-PYTHONPATH=. mim train mmdet3d configs/replace_with_config.py -l pytorch -G 4 \
-  --work-dir work_dirs/replace_with_work_dir
-```
-
-## 常用命令
-
-### 列出用户相关任务
-
-列出近 10 条、全部常见状态的 `dzp` 任务：
+只有明确获准后才能执行。例如取消前先核对，再确认具体任务：
 
 ```bash
 . "$HOME/.volc_env"
-volc ml_task list -n dzp \
-  --status Initialized,Queue,Staging,Running,Killing,Success,Failed,Killed,Exception \
-  --limit 10 \
-  --offset 0 \
-  --output json \
-  --format=JobId,JobName,Status,Start,End
+volc ml_task get --id <task-id> --output json
+# 仅在具体取消操作得到确认后执行：
+volc ml_task cancel --id <task-id>
 ```
 
-列出近 25 条、全部常见状态的 `dzp` 任务：
+## 进一步查询
+
+[完整 CLI 文档](references/full-cli-doc.md) 是历史官网导出资料，仅在正文和提交流程不足时按需查阅。通用示例不能覆盖用户的固定默认值或权限边界；不确定当前支持的字段时先看本机 `--help`，必要时再核对官方文档。
 
 ```bash
-volc ml_task list -n dzp \
-  --status Initialized,Queue,Staging,Running,Killing,Success,Failed,Killed,Exception \
-  --limit 25 \
-  --offset 0 \
-  --output json \
-  --format=JobId,JobName,Status,Start,End
+rg -n "^### submit|^### export|SidecarMemoryRatio|AccessType" references/full-cli-doc.md
 ```
 
-`--output json` 下默认只返回 10 条。需要超过 25 条时，再显式增大 `--limit` 或使用 `--offset` 翻页：
-
-```bash
-volc ml_task list -n dzp \
-  --status Initialized,Queue,Staging,Running,Killing,Success,Failed,Killed,Exception \
-  --limit 100 \
-  --offset 0 \
-  --output json \
-  --format=JobId,JobName,Status,Start,End
-```
-
-按状态筛选：
-
-```bash
-volc ml_task list -n dzp --status Queue,Staging,Running --limit 10 --output json
-volc ml_task list -n dzp --status Success,Failed,Killed,Exception --limit 25 --output json
-```
-
-需要限定输出字段时，先查询支持的字段：
-
-```bash
-volc ml_task list --helpformat
-volc ml_task list -n dzp \
-  --status Initialized,Queue,Staging,Running,Killing,Success,Failed,Killed,Exception \
-  --limit 100 \
-  --offset 0 \
-  --output json \
-  --format=JobId,JobName,Status,Start,End
-```
-
-### 查看任务详情
-
-```bash
-. "$HOME/.volc_env"
-volc ml_task get --id t-xxxxxxxxxxxxxxxxxxxxx
-volc ml_task get --id t-xxxxxxxxxxxxxxxxxxxxx --output json
-```
-
-用途：
-- 核对任务名称、状态、资源队列、镜像、入口命令、参数、实例规格、存储挂载。
-- 在任何危险操作前确认目标任务。
-- 从线上任务还原配置时，结合 `export` 使用。
-
-### 查看实例列表
-
-```bash
-. "$HOME/.volc_env"
-volc ml_task instance list --id t-xxxxxxxxxxxxxxxxxxxxx
-volc ml_task instance list --id t-xxxxxxxxxxxxxxxxxxxxx --output json
-```
-
-实例列表可能返回完整实例名，例如 `t-xxxxxxxx-worker-0`。日志命令通常使用角色实例短名，例如 `worker_0`，不要直接把完整实例名传给 `logs -i`。
-
-### 查看日志
-
-查看某个任务的最新 100 条日志：
-
-```bash
-. "$HOME/.volc_env"
-volc ml_task logs -t t-xxxxxxxxxxxxxxxxxxxxx -i worker_0 --lines 100
-```
-
-其他常用日志查询：
-
-```bash
-volc ml_task logs --task t-xxxxxxxxxxxxxxxxxxxxx --instance worker_0
-volc ml_task logs -t t-xxxxxxxxxxxxxxxxxxxxx -i worker_0 --lines 200
-volc ml_task logs -t t-xxxxxxxxxxxxxxxxxxxxx -i worker_0 --content error --lines 200
-volc ml_task logs -t t-xxxxxxxxxxxxxxxxxxxxx -i worker_0 -f
-```
-
-要点：
-- `--content` 支持 Lucene 检索语法。
-- 不加 `--reverse` 时，默认从当前时间向前取最新 `--lines` 条日志；这是查看当前进度的正确方式。
-- `--reverse` 会从任务启动时间开始取最早的 `--lines` 条日志，不适合查看最新进度。
-- `--lines` 默认 500；常规进度查询优先用 `--lines 100`，避免占用过多上下文。
-- `-f` 持续滚动日志；长时间跟随日志时应避免阻塞当前工作，必要时放入 tmux。
-- 如果日志时间与平台/本地时间刚好相差 8 小时，大概率是日志时区错位；结合任务状态和日志内容判断，不要直接认为日志停滞。
-
-### 导出任务配置或代码
-
-```bash
-. "$HOME/.volc_env"
-volc ml_task export --task t-xxxxxxxxxxxxxxxxxxxxx --config
-volc ml_task export --task t-xxxxxxxxxxxxxxxxxxxxx --code
-volc ml_task export --task t-xxxxxxxxxxxxxxxxxxxxx --config --code
-```
-
-用途：
-- 从已有任务导出 YAML 配置，作为新任务模板。
-- 下载任务代码进行排查。
-
-### 上传训练代码
-
-可以在提交任务时上传代码，也可以提前上传以加速创建：
-
-```bash
-. "$HOME/.volc_env"
-volc ml_task upload --local_code_path ./path/to/code --region cn-beijing
-```
-
-常用选项：
-- `--local_diff on|off`：是否仅上传增量，默认 `on`。
-- `--copy-links`：上传软链接指向的实际文件；当软链接是绝对路径或指向上传目录外文件时优先使用。
-- `--links`：直接上传软链接；仅当容器内存在相同链接关系时使用。
-
-### 提交训练任务
-
-提交任务属于创建线上任务，必须二次确认后再执行。默认从已验证模板复制到 `/tmp` 后修改：
-
-```bash
-cp skills/volc-ml-task/references/ml-task-template.yaml /tmp/dzp_task.yaml
-```
-
-最常改字段：
-- `TaskName`：遵循 `dzp_<project>_<experiment>`，其中 `<experiment>` 与 `work_dir` 末级目录一致。
-- `Entrypoint`：包含固定环境准备、GitHub SSH 443 同步、训练命令。
-- `TaskRoleSpecs[0].Flavor`：仅在用户要求改 GPU 数量时修改。
-
-尽量不要修改默认队列、镜像、TOS/vePFS 挂载、自动重试、诊断项，除非用户明确要求。
-
-已验证的最小 smoke test 结果：基于模板结构创建 `dzp_volc_test`，单卡 `ml.pni2.3xlarge`，入口命令只 `cd` 后打印信息并退出，任务成功完成。
-
-提交前给用户的二次确认摘要必须包含：
-
-```text
-任务名称: <TaskName>
-GPU: <N> 卡，Flavor=<Flavor>
-入口命令:
-<Entrypoint>
-
-与默认模板差异:
-- TaskName: <changed/unchanged>
-- Entrypoint: <changed/unchanged>
-- Flavor/GPU: <changed/unchanged>
-- ResourceQueueID: <same/different>
-- ImageUrl: <same/different>
-- Storages: <same/different>
-- Preemptible: <same/different>
-- Priority: <same/different>
-- RetryOptions: <same/different>
-- DiagOptions: <same/different>
-
-将执行:
-volc ml_task submit -c /tmp/dzp_task.yaml --output json
-```
-
-```bash
-. "$HOME/.volc_env"
-volc ml_task submit -c /tmp/dzp_task.yaml --output json
-```
-
-常见覆盖参数：
-
-```bash
-volc ml_task submit \
-  -c task.yaml \
-  -n dzp-example-task \
-  --entrypoint "python train.py" \
-  --args "--config configs/train.yaml --epochs 10" \
-  --image "image-url" \
-  --resource_queue_id "q-xxxxxxxx" \
-  --framework Custom \
-  --output json
-```
-
-提交前检查：
-- 任务名必须遵循 `dzp_<project>_<experiment>`，除非用户明确要求其他命名；`<experiment>` 必须与 `work_dir` 末级目录一致。
-- 入口命令开头必须有 `cd` 绝对路径、`. /root/miniconda3/bin/activate`、`source haoce_activate.sh`。
-- 入口命令中必须先用 GitHub SSH 443 同步 git 并打印最新提交，再运行训练命令。
-- `UserCodePath` 与 `RemoteMountCodePath` 是否匹配。
-- `Entrypoint` 和 `Args` 是否会被命令行参数覆盖。
-- `ImageUrl` 是否正确，私有镜像是否需要 `ImageCredential`。
-- `ResourceQueueID` 或 `ResourceQueueName` 是否正确；`ResourceQueueName` 优先级高于 `ResourceQueueID`。
-- `Framework` 是否为支持值：`TensorFlowPS`、`PyTorchDDP`、`MXNet`、`BytePS`、`MPI`、`Custom`。
-- `TaskRoleSpecs` 中 `RoleName`、`RoleReplicas`、`Flavor`、`GpuRate` 是否符合预期。已知 1 卡为 `ml.pni2.3xlarge`，4 卡为 `ml.pni2.14xlarge`；2 卡、8 卡需确认规格后再提交。
-- `Storages` 中 TOS/NAS/vePFS 挂载路径、只读配置、缓存参数是否合理。
-- TOS Fuse 挂载使用 `Type: "TosFuse"` 和 `CacheType: "Cloudfs"`；不要把 AK/SK 写进 YAML，TOS 鉴权依赖当前 `volc configure` 凭证及平台权限校验。
-- 若挂载 TOS，注意 `SidecarMemoryRatio`。填写时建议 `SidecarMemoryRatio * 实例规格内存 >= 4GiB`，否则可能挂载失败或容器异常。
-- `AccessType` 与 `AccessUsers` 是否会暴露给不该看到任务的人。
-- `Preemptible`、`Priority`、`RetryOptions`、`DiagOptions` 是否符合用户意图。
-
-`--entrypoint` 示例：
-
-```bash
---entrypoint=./start.sh
---entrypoint="python main.py"
-```
-
-`--args` 示例，以下形式等价：
-
-```bash
---args=--aaa=1 --args=--bbb=2 --args=--ccc=3
---args="--aaa=1 --bbb=2 --ccc=3"
---args='--aaa=1 --bbb=2' --args=--ccc=3
-```
-
-`--set` 可覆盖 YAML 中字段，但优先级低于其他显式 flag：
-
-```bash
-volc ml_task submit -c task.yaml --set Entrypoint="sleep 5s" --set Priority=4
-```
-
-### 取消任务
-
-取消任务会改变线上任务状态。原则上不执行，除非用户强烈要求并完成二次确认。
-
-```bash
-. "$HOME/.volc_env"
-volc ml_task cancel --id t-xxxxxxxxxxxxxxxxxxxxx
-```
-
-执行前必须先运行：
-
-```bash
-. "$HOME/.volc_env"
-volc ml_task get --id t-xxxxxxxxxxxxxxxxxxxxx --output json
-```
-
-并向用户复述目标任务 ID、任务名、当前状态和即将执行的取消命令。
-
-## 配置文件重点
-
-`ml_task submit -c task.yaml` 的 YAML 常见字段：
-
-- `TaskName`：任务名，用户任务默认以 `dzp` 开头。
-- `Description`：任务描述。
-- `Entrypoint`、`Args`：入口命令和参数。
-- `UserCodePath`：本地代码路径。目录以 `/` 结尾时上传目录下内容；不以 `/` 结尾时上传目录本身及其内容。
-- `RemoteMountCodePath`：容器内代码挂载路径。
-- `Envs`：环境变量，`IsPrivate: true/false` 控制详情页可见性。
-- `ImageUrl`、`ImageCredential`：镜像及私有镜像凭证。
-- `ResourceQueueID`、`ResourceQueueName`：资源队列，名称优先级更高。
-- `Framework`：训练框架。
-- `TaskRoleSpecs`：角色、实例数、规格、GPU 切分。
-- `ActiveDeadlineSeconds`、`DelayExitTimeSeconds`：最长运行时间和实例保留时长。
-- `AccessType`、`AccessUsers`：可见范围和可见用户。
-- `Preemptible`、`Priority`：可抢占与优先级。
-- `RetryOptions`：自动重试。
-- `DiagOptions`：任务诊断。
-- `PrivateNetwork`：VPC/Subnet/安全组。
-- `CustomServices`：自定义指标采集端口。
-- `EnableTensorBoard`、`TensorBoardStorage`：TensorBoard。
-- `SidecarMemoryRatio`、`Storages`：TOS/NAS/vePFS 数据盘挂载。
-
-字段细节或完整样例不足时，读取 [references/full-cli-doc.md](references/full-cli-doc.md) 中 `ml_task submit` 章节。
+`ml_model`、`ml_service` 只在用户明确询问时查阅。只有另行授权使用代码上传工作流时，才查 `ml_task upload`、`--links`、`--copy-links` 的细节。
