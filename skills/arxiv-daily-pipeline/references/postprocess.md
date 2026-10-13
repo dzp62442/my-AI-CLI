@@ -4,13 +4,12 @@
 
 ## 约束
 
-- **不修改 zotero-arxiv-daily 项目代码**
-- 论文原文用 Agent 自带的抓取/读文件工具获取（`web_extract` / `web_fetch` / `read_file`），**不要**在 `/tmp` 下写一次性 Python 脚本做提取
-- **飞书文档一次性上传完整内容**：原始论文列表 + 主题筛选 + 论文解读，一个文档、一次导入
+- 论文原文用 Agent 自带的抓取/读文件工具取（`web_extract` / `web_fetch` / `read_file`）
+- 飞书文档一次性上传完整内容：原始论文列表 + 主题筛选 + 论文解读，一个文档、一次导入
 
 ## 1. 主题筛选
 
-匹配口径（结合标题、摘要、TLDR 与研究内容综合判断，**不要机械关键词匹配**）：
+匹配口径（结合标题、摘要、TLDR 与研究内容综合判断）：
 
 | 级别 | 关键词 |
 |------|--------|
@@ -102,7 +101,7 @@ wc -l < "$COMBINED"
 ```bash
 DATE=$(date +%F)
 SPACE_ID=7621015102212295908
-PARENT_NODE=D67vwKFYyiZr0gk080dcr89tnyb     # 文献阅读 → 每日推送（C54KwvndwibrEqkf2zvcHSCfnte 是父目录，不要停留）
+PARENT_NODE=D67vwKFYyiZr0gk080dcr89tnyb     # 文献阅读 → 每日推送（C54KwvndwibrEqkf2zvcHSCfnte 是它的父目录）
 
 # A. 导入合并文档
 feishu-cli doc import "/tmp/daily-push-${DATE}.md" --title "每日文献推送 ${DATE}" --output json
@@ -116,7 +115,7 @@ feishu-cli wiki move-docs <document_id> --space-id "$SPACE_ID" \
 feishu-cli doc get <document_id> --output json
 ```
 
-**回读校验**（不要跳过）：
+**回读校验**（逐项确认）：
 
 ```bash
 feishu-cli doc export <document_id> --output /tmp/verify-${DATE}.md

@@ -12,7 +12,7 @@
 
 1. 等几分钟重试，或让预检跳过坏窗口
 2. 持续大面积 406 → 手动预热后重跑
-3. **强风控窗口**（连 curl 未命中请求也被拦）：无法灌缓存，照常汇报、等窗口缓解，**不加组件**
+3. **强风控窗口**（连 curl 未命中请求也被拦）：无法灌缓存，照常汇报、等窗口缓解
 
 ### 手动预热（恢复用）
 
@@ -90,14 +90,14 @@ feishu-cli doc export <doc_token> --output /tmp/verify.md && grep -c "批判性�
 
 ---
 
-## 代码补丁状态（勿误清）
+## 代码补丁状态
 
-`src/zotero_arxiv_daily/retriever/arxiv_retriever.py` 有**有意保留**的未提交修改（`git status` 显示 ` M` 属正常）：
+`src/zotero_arxiv_daily/retriever/arxiv_retriever.py` 有一处**有意未提交**的改动（`git status` 显示 ` M` 属正常）：
 
 - `trafilatura.fetch_url` → `requests.get(timeout=30)`（trafilatura 不读代理 env）
 - API 重试 10 次/10s → 5 次/60s
 
-**勿被 `git checkout` / `clean` / `reset` 清掉**——清了 HTML 下载就失去代理支持。
+`git checkout` / `clean` / `reset` 会抹掉它们，HTML 下载随即失去代理支持。
 
 ---
 
