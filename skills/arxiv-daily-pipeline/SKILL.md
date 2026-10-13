@@ -1,14 +1,14 @@
 ---
 name: arxiv-daily-pipeline
-description: "Use when 运营/排障 zotero-arxiv-daily 文献推送流水线：启动主程序、结果后处理、飞书归档、406 风控。"
-version: 3.1.0
+description: "组织从 Zotero 兴趣推荐到飞书知识库归档的每日文献推送。用于启动 zotero-arxiv-daily、按研究主题筛选论文并标注五类标签、阅读原文生成简要解读、组装完整 Markdown 日报，以及排查这条流水线的运行与归档问题。"
 metadata:
+  version: "3.2.0"
   tags: [arxiv, pipeline, feishu, gaussian-occupancy]
 ---
 
 # arXiv Daily 文献推送流水线
 
-zotero-arxiv-daily 的日常运营、后处理与排障。
+先由 zotero-arxiv-daily 自动生成「每日 arxiv 推送」，再由 AI Agent 逐篇筛选、打标签并解读相关论文，合成完整 Markdown 文档归档到飞书知识库。
 
 **流程、项目代码与网络（代理、clash）都不随意改动；遇到问题先报告，等兰德专门处理。**
 
@@ -19,7 +19,7 @@ zotero-arxiv-daily 的日常运营、后处理与排障。
 | 段 | 做什么 | 耗时 |
 |----|--------|------|
 | 启动 | 缓存预热 → API 预检 → tmux 启动 zotero-arxiv-daily 主程序 | 30-60 分钟 |
-| 后处理 | 产出 md → 主题筛选 → 论文解读 → 组装 → 飞书归档（`feishu-cli`） | 几分钟 |
+| 后处理 | 读取原始 md → 主题筛选 → 论文标签 → 简要解读 → 组装 → 飞书归档（`feishu-cli`） | 随论文数量和原文获取情况变化 |
 
 ## 关键路径与参数
 
@@ -39,7 +39,7 @@ zotero-arxiv-daily 的日常运营、后处理与排障。
 | 场景 | 去哪 |
 |------|------|
 | 正常跑一轮 | 下文「启动主程序」+「后处理」 |
-| 后处理规范：筛选口径、7 维解读、组装、飞书命令 | `references/postprocess.md` |
+| 主题筛选、标签标注、7 维解读、组装与归档 | 下文「后处理」中的必读规范与标签配置 |
 | 报错、406、卡死、代理未就绪 | `references/troubleshooting.md` |
 | 历史与决策原因 | `references/devlog.md` |
 
@@ -82,13 +82,16 @@ arXiv API 响应经 CDN 缓存；风控只拦「缓存未命中→回源」的 P
 
 ## 后处理
 
-产出 `outputs/daily-arxiv-{date}.md` 后，三步闭环：
+**进行后处理时，必须先完整阅读 [后处理规范](references/postprocess.md)，并读取 [论文标签配置](references/paper-tags.yaml) 中的五类标签、可选值与选取注意事项。** 组装时按 [汇总文档模板](templates/daily-push-report.md) 保持表格与解读格式一致。
 
-1. **主题筛选** — 按前馈重建 / 占据预测口径逐篇判断
-2. **论文解读** — 对入选论文取 arXiv 原文（优先 HTML 版），写 7 维结构化解读，单篇 ≤500 字
-3. **组装 + 飞书归档** — 原始输出 + 筛选 + 解读合并成**一个** md，用 `feishu-cli` 一次导入并移到「文献阅读 → 每日推送」
+输入是主程序已生成的 `outputs/daily-arxiv-{date}.md`。保留其中完整的「每日 arxiv 推送」，由 Agent 接续完成：
 
-完整口径、产出格式、命令与回读校验见 **`references/postprocess.md`**（执行前先读）。
+1. **主题筛选** — 按前馈重建 / 占据预测及相关方向，逐篇判断是否入选并说明理由。
+2. **论文标签** — 为原始日报中的每篇论文选择研究领域、输入配置、平台、场景、技术特征五类标签；研究领域单选，其余按 YAML 规则多选或留无适用标记。信息不足时查阅原文，不凭标题猜测。
+3. **简要解读** — 只对符合主题的论文进行解读；优先获取 arXiv HTML 原文，按 7 个维度撰写，单篇 ≤500 字，重点论文的安排遵循后处理规范。
+4. **组装与归档** — 原始输出 + 含标签的主题筛选表 + 论文解读合为**一个** Markdown，用 `feishu-cli` 一次导入并移到「文献阅读 → 每日推送」，再回读核对。
+
+**五类标签只出现在「主题筛选结果」表格中**，每篇论文一行，并注明入选或未入选；原始项目输出和后面的论文解读均不附加标签。完整筛选口径、标签填写方式、输出格式、飞书命令及回读校验以必读的后处理规范为准。
 
 ## 监控
 
@@ -104,11 +107,9 @@ ls ~/Libraries/zotero-arxiv-daily/outputs/$(date +%F)/*/main.log
 
 feishu-cli 的两个坑：stdout 会混入 `[自动刷新] Access Token...` 日志（解析 JSON 前先截断到首个 `{`/`[`）；偶发 `EOF`（网络抖动）重试 2-4 次、调用前 unset 代理变量。文档链接 = `https://feishu.cn/wiki/<node_token>`。
 
-## See Also
+## 仅在需要时查阅的文档与脚本
 
-- `references/postprocess.md` — 后处理规范（筛选口径 / 7 维解读 / 组装 / 飞书归档 / 回读校验）
-- `references/troubleshooting.md` — 406、代理未就绪、卡死、假阳性/假阴性、手动恢复
-- `references/devlog.md` — 迭代与排障历史（实验记录、事故复盘、决策原因）
-- `scripts/arxiv-daily-launch.sh` — 启动脚本
-- `scripts/arxiv-warmup.py` — 批次 URL 预热清单生成器
-- `templates/daily-push-report.md` — 推送文档结构 / 汇报文本模板
+- [故障排查](references/troubleshooting.md) — 出现 406、代理未就绪、卡死或归档内容不完整时查阅。
+- [历史记录](references/devlog.md) — 需要了解既有方案的实验依据、事故复盘和决策原因时查阅。
+- [启动脚本](scripts/arxiv-daily-launch.sh) — 需要检查启动过程与参数时阅读。
+- [预热脚本](scripts/arxiv-warmup.py) — 需要排查批次 URL 清单生成时阅读。
